@@ -285,6 +285,11 @@ def parser():
         "--exec", action="store_true", help="replace this process with the native CLI"
     )
     action.add_argument(
+        "--plan",
+        action="store_true",
+        help="emit structured selection and native launch fields, without prompt",
+    )
+    action.add_argument(
         "--argv",
         action="store_true",
         help="emit exact argv JSON, including supplied prompt",
@@ -364,7 +369,10 @@ def main(argv=None):
             print(json.dumps(report))
             return 75
         command = command_for(selected, prompt, extra)
-        if args.argv:
+        if args.plan:
+            report["plan"] = selected
+            print(json.dumps(report))
+        elif args.argv:
             print(json.dumps(command))
         elif args.exec:
             os.environ.pop(

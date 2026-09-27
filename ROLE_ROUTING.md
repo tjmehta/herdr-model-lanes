@@ -73,6 +73,11 @@ the created pane/tab IDs and means the command was submitted, not that the CLI
 became ready or executed a task. Inspect the returned pane if startup fails.
 Never automatically retry a partially completed launch.
 
+`--plan` emits the sanitized decision plus a `plan` object with route name, native
+kind, model, managed command and native argument array, without any prompt. A
+project lifecycle adapter can validate this against its allowed native profiles
+before starting a session. Selection itself never creates a session.
+
 `--exec` replaces the current process, preserving cwd/environment/stdin. `--argv`
 emits a JSON argv array for an existing creation caller that already owns pane
 creation. Unlike explain output, it includes the supplied task and instructions;

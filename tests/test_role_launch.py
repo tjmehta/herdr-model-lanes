@@ -263,6 +263,31 @@ class PolicyAndLaunchTests(unittest.TestCase):
         self.assertEqual(execute.call_args.args[0], "codex")
         self.assertEqual(execute.call_args.args[1][-2:], ["--", "do work"])
 
+    def test_plan_exposes_native_profile_without_task_or_credentials(self):
+        output = io.StringIO()
+        with (
+            mock.patch.object(role, "load_config", return_value=self.config),
+            mock.patch.object(
+                proxy,
+                "snapshot",
+                return_value={
+                    "fetched_at": NOW,
+                    "capacity": {"codex/gpt-sol": [quota(60)]},
+                },
+            ),
+            contextlib.redirect_stdout(output),
+        ):
+            self.assertEqual(
+                role.main(["lead", "--plan", "--prompt", "private task"]), 0
+            )
+        plan = json.loads(output.getvalue())["plan"]
+        self.assertEqual(plan["kind"], "codex")
+        self.assertEqual(plan["command"], ["codex"])
+        self.assertEqual(
+            plan["args"], ["--model", "gpt-sol", "-c", 'model_reasoning_effort="high"']
+        )
+        self.assertNotIn("private task", output.getvalue())
+
     def test_explain_does_not_print_task(self):
         output = io.StringIO()
         with (

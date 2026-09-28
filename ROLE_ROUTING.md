@@ -162,6 +162,20 @@ are no automatic retries. A small atomic mode-0600 cache stores only anonymous
 normalized capacity, keyed by source/config/requested model set, for 30 seconds
 at most by default, capped at 60. Reset boundaries invalidate it. `--refresh`
 bypasses it. Failed refreshes replace rather than revive old healthy data.
+
+Provider usage endpoints throttle quickly (Anthropic returns 429 for minutes
+after a dozen reads), so each account's usage reading is cached separately and
+shared by every role. It is re-read after `usage_cache_seconds` (default 1800)
+while more than 50% is left, a third of that from 20%, and a sixth below 20%
+(30/10/5 minutes by default). Concurrent launches take a per-account lock, so
+one refreshes and the rest reuse its reading. `usage_stale_seconds` (default
+3600) of fallback covers a re-read that is throttled or unreachable, never past
+a window reset and never over an auth error. Proxy cooldowns are read live on
+every launch, so a session that hit its limit through the proxy makes the next
+launch skip that account immediately; the usage reading only has to catch usage
+the proxy never sees (apps, chat, unproxied CLIs). After a manual reset
+(credits added, limits restored), run any role with `--refresh`; it ignores
+every cached reading.
 This cache bounds normal repeated launch queries; it is not a distributed lock
 or a reservation service. Set `MODEL_LANES_STATE_DIR` to override its directory.
 

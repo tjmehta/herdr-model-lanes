@@ -40,6 +40,11 @@ class ParserTests(unittest.TestCase):
         self.assertEqual(
             p.parse_usage("claude", body, "claude-opus", NOW)["remaining_percent"], 80
         )
+        breakdown = {"rows": [{"key": "claude_code", "percent": 100}]}
+        body["seven_day_breakdown"] = breakdown
+        self.assertEqual(
+            p.parse_usage("claude", body, "claude-opus", NOW)["remaining_percent"], 80
+        )
         body["seven_day_new_pool"] = cw(100)
         self.assertEqual(
             p.parse_usage("claude", body, "claude-opus", NOW)["state"], "exhausted"
@@ -188,6 +193,76 @@ class CollectionTests(unittest.TestCase):
             p.snapshot(config, [("codex", "gpt-sol")], Path(directory), now=NOW + 990)
             p.snapshot(config, [("codex", "gpt-sol")], Path(directory), now=NOW + 1001)
             self.assertEqual(factory.call_count, 2)
+
+    def test_usage_cache_is_shared_across_lane_sets_and_bounded(self):
+        with tempfile.TemporaryDirectory() as directory:
+            client = self.client()
+            client.request.side_effect = lambda path: (
+                {"files": [{"auth_index": "b", "name": "private-b", "provider": "codex"}]}
+                if path == "/auth-files"
+                else {"models": [{"id": "gpt-sol"}, {"id": "gpt-luna"}]}
+            )
+            cache = p.UsageCache(Path(directory), fresh=300, stale=1800)
+            p.collect(client, [("codex", "gpt-sol")], NOW, cache)
+            other = p.collect(client, [("codex", "gpt-luna")], NOW + 10, cache)
+            self.assertEqual(other["codex/gpt-luna"][0]["state"], "ok")
+            client.usage.assert_called_once()
+            self.assertNotIn("private", "".join(f.read_text() for f in Path(directory).iterdir()))
+
+            client.usage.side_effect = p.CapacityError("unavailable")
+            throttled = p.collect(client, [("codex", "gpt-sol")], NOW + 600, cache)
+            self.assertEqual(throttled["codex/gpt-sol"][0]["remaining_percent"], 80)
+            past_reset = p.collect(client, [("codex", "gpt-sol")], NOW + 1000, cache)
+            self.assertEqual(past_reset["codex/gpt-sol"][0]["state"], "unavailable")
+
+            client.usage.side_effect = p.CapacityError("auth_error")
+            denied = p.collect(client, [("codex", "gpt-sol")], NOW + 600, cache)
+            self.assertEqual(denied["codex/gpt-sol"][0]["state"], "auth_error")
+
+            client.usage.side_effect = p.CapacityError("unavailable")
+            forced = p.UsageCache(Path(directory), fresh=300, stale=1800, force=True)
+            reset = p.collect(client, [("codex", "gpt-sol")], NOW + 10, forced)
+            self.assertEqual(reset["codex/gpt-sol"][0]["state"], "unavailable")
+
+    def test_usage_rechecks_sooner_as_an_account_nears_empty(self):
+        with tempfile.TemporaryDirectory() as directory:
+            cache = p.UsageCache(Path(directory), fresh=1800)
+            for used, reuse, recheck in ((40, 1799, 1800), (70, 599, 600), (85, 299, 300)):
+                cache.put("claude", "a", {"m": p.result("ok", NOW + 9000, 100 - used)}, NOW)
+                self.assertIsNotNone(cache.get("claude", "a", ["m"], NOW + reuse))
+                self.assertIsNone(cache.get("claude", "a", ["m"], NOW + recheck))
+
+    def test_concurrent_launches_share_one_refresh(self):
+        import threading
+
+        with tempfile.TemporaryDirectory() as directory:
+            cache = p.UsageCache(Path(directory))
+            client = self.client()
+            held, release = threading.Event(), threading.Event()
+
+            def other_launch():
+                with cache.lock("codex", "b"):
+                    held.set()
+                    release.wait(5)
+                    cache.put("codex", "b", {"gpt-sol": p.result("ok", NOW + 9000, 70)}, NOW)
+
+            thread = threading.Thread(target=other_launch)
+            thread.start()
+            held.wait(5)
+            threading.Timer(0.3, release.set).start()
+            capacity = p.collect(client, [("codex", "gpt-sol")], NOW, cache)
+            thread.join()
+            self.assertEqual(capacity["codex/gpt-sol"][-1]["remaining_percent"], 70)
+            client.usage.assert_not_called()
+
+    def test_proxy_cooldown_blocks_despite_a_healthy_cached_reading(self):
+        # A session that hit its limit through the proxy leaves a cooldown; the
+        # relaunch must see it now, not when the usage reading expires.
+        with tempfile.TemporaryDirectory() as directory:
+            cache = p.UsageCache(Path(directory))
+            cache.put("codex", "a", {"gpt-sol": p.result("ok", NOW + 9000, 90)}, NOW)
+            capacity = p.collect(self.client(), [("codex", "gpt-sol")], NOW + 10, cache)
+            self.assertEqual(capacity["codex/gpt-sol"][0]["state"], "exhausted")
 
     def test_key_file_permissions_and_never_source_dotenv(self):
         with (

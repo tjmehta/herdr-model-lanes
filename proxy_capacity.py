@@ -6,6 +6,8 @@ metadata, response bodies or credentials. The proxy remains the refresh owner.
 
 from __future__ import annotations
 
+import contextlib
+import fcntl
 import hashlib
 import json
 import math
@@ -117,7 +119,8 @@ def parse_usage(provider, body, model, now):
         for required in ("five_hour", "seven_day"):
             add(body.get(required), "utilization")
         for name, value in body.items():
-            if name in ("five_hour", "seven_day") or value is None:
+            # seven_day_breakdown splits usage by surface; it is not a limit window.
+            if name in ("five_hour", "seven_day", "seven_day_breakdown") or value is None:
                 continue
             if not name.startswith(("seven_day_", "five_hour_")):
                 continue
@@ -335,7 +338,88 @@ class Client:
             raise CapacityError("unknown") from None
 
 
-def collect(client, requested, now):
+class UsageCache:
+    """Normalized per-account usage, shared by every role's lane set.
+
+    Provider usage endpoints throttle quickly (Anthropic's 429s for minutes), so a
+    reading is reused for up to `fresh` seconds, less as the account nears empty,
+    and for up to `stale` seconds when a refresh is throttled. Never past a
+    window's reset. Proxy cooldowns are still read live on every call, so
+    exhaustion seen by proxied inference blocks immediately; the reading only
+    has to catch usage the proxy never sees (apps, chat, unproxied CLIs).
+    `force` (--refresh) ignores every cached reading.
+    """
+
+    def __init__(self, directory, fresh=1800, stale=3600, force=False):
+        self.directory = directory
+        self.fresh = fresh
+        self.stale = stale
+        self.force = force
+
+    def path(self, provider, identity, suffix=".json"):
+        digest = hashlib.sha256(json.dumps([provider, identity]).encode()).hexdigest()
+        return self.directory / ("usage-" + digest[:24] + suffix)
+
+    def refresh_after(self, hits):
+        """Full `fresh` above 50% left, a third of it from 20%, a sixth below."""
+        left = min((v["remaining_percent"] or 0) for v in hits.values())
+        return self.fresh if left > 50 else self.fresh / 3 if left >= 20 else self.fresh / 6
+
+    def get(self, provider, identity, models, now, limit=None):
+        if self.force:
+            return None
+        try:
+            data = json.loads(self.path(provider, identity).read_text())
+            hits = {m: data["models"][m] for m in models}
+            age = now - data["fetched_at"]
+            # A concurrent launch may have refreshed after this one read the clock.
+            if not -60 <= age < (limit or self.refresh_after(hits)):
+                return None
+        except (OSError, ValueError, KeyError, TypeError):
+            return None
+        if any(v["reset_at"] and v["reset_at"] <= now for v in hits.values()):
+            return None
+        return hits
+
+    @contextlib.contextmanager
+    def lock(self, provider, identity, wait=25):
+        """One refresh per account at a time; other launches reuse its reading."""
+        self.directory.mkdir(mode=0o700, parents=True, exist_ok=True)
+        fd = os.open(self.path(provider, identity, ".lock"), os.O_RDWR | os.O_CREAT, 0o600)
+        try:
+            deadline = time.monotonic() + wait
+            while True:
+                try:
+                    fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    break
+                except BlockingIOError:
+                    # Holders are bounded by the client budget; never wait forever.
+                    if time.monotonic() >= deadline:
+                        break
+                    time.sleep(0.1)
+            yield
+        finally:
+            os.close(fd)
+
+    def put(self, provider, identity, models, now):
+        self.directory.mkdir(mode=0o700, parents=True, exist_ok=True)
+        write_private(self.path(provider, identity), {"fetched_at": now, "models": models})
+
+
+def write_private(path, data):
+    import tempfile
+
+    fd, temporary = tempfile.mkstemp(dir=path.parent, prefix=".proxy-")
+    try:
+        with os.fdopen(fd, "w") as stream:
+            json.dump(data, stream)
+        os.replace(temporary, path)
+    finally:
+        if os.path.exists(temporary):
+            os.unlink(temporary)
+
+
+def collect(client, requested, now, cache=None):
     """Return per-lane anonymous account states, never account identifiers."""
     accounts = client.request("/auth-files").get("files")
     if not isinstance(accounts, list) or len(accounts) > 64:
@@ -371,16 +455,28 @@ def collect(client, requested, now):
                 output[f"{provider}/{model}"].append(block)
             else:
                 pending.append(model)
-        if pending:
-            try:
-                body = client.usage(account, provider)
-                for model in pending:
-                    output[f"{provider}/{model}"].append(
-                        parse_usage(provider, body, model, now)
-                    )
-            except CapacityError as exc:
-                for model in pending:
-                    output[f"{provider}/{model}"].append(result(str(exc)))
+        if not pending:
+            continue
+        states = cache and cache.get(provider, identity, pending, now)
+        with cache.lock(provider, identity) if cache and not states else contextlib.nullcontext():
+            # Launches that waited on the lock reuse the reading it produced.
+            states = states or (cache and cache.get(provider, identity, pending, now))
+            if not states:
+                try:
+                    body = client.usage(account, provider)
+                    # Parse every supported model so other roles can reuse this read.
+                    parsed = {m: parse_usage(provider, body, m, now) for m in supported}
+                    if cache:
+                        cache.put(provider, identity, parsed, now)
+                    states = {m: parsed[m] for m in pending}
+                except CapacityError as exc:
+                    # Throttled or unreachable: a bounded older reading beats none.
+                    # An auth error is never masked.
+                    if str(exc) == "unavailable" and cache:
+                        states = cache.get(provider, identity, pending, now, cache.stale)
+                    states = states or {m: result(str(exc)) for m in pending}
+        for model in pending:
+            output[f"{provider}/{model}"].append(states[model])
     return output
 
 
@@ -406,21 +502,19 @@ def snapshot(config, requested, cache_dir, force=False, now=None):
         except (OSError, ValueError, KeyError, TypeError):
             pass
     client = Client(config)
+    usage = UsageCache(
+        cache_dir,
+        max(0, float(config.get("usage_cache_seconds", 1800))),
+        max(0, float(config.get("usage_stale_seconds", 3600))),
+        force,
+    )
     try:
-        capacity = collect(client, requested, now)
+        capacity = collect(client, requested, now, usage)
     except CapacityError as exc:
         capacity = {f"{p}/{m}": [result(str(exc))] for p, m in requested}
     data = {"fetched_at": now, "capacity": capacity}
-    # Failed reads never resurrect an older healthy snapshot.
+    # Failed reads never resurrect an older lane snapshot; only UsageCache's
+    # bounded per-account readings survive a throttled refresh.
     cache_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
-    import tempfile
-
-    fd, temporary = tempfile.mkstemp(dir=cache_dir, prefix=".proxy-")
-    try:
-        with os.fdopen(fd, "w") as stream:
-            json.dump(data, stream)
-        os.replace(temporary, path)
-    finally:
-        if os.path.exists(temporary):
-            os.unlink(temporary)
+    write_private(path, data)
     return data

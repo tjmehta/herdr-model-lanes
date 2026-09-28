@@ -264,6 +264,70 @@ class CollectionTests(unittest.TestCase):
             capacity = p.collect(self.client(), [("codex", "gpt-sol")], NOW + 10, cache)
             self.assertEqual(capacity["codex/gpt-sol"][0]["state"], "exhausted")
 
+    def test_relaunch_right_after_a_launch_sees_a_new_cooldown(self):
+        with (
+            tempfile.TemporaryDirectory() as directory,
+            mock.patch.object(p, "Client", return_value=self.client()) as factory,
+        ):
+            config = {"management_url": "http://localhost"}
+            lanes = [("codex", "gpt-sol")]
+            first = p.snapshot(config, lanes, Path(directory), now=NOW)
+            self.assertEqual(first["capacity"]["codex/gpt-sol"][1]["state"], "ok")
+            accounts = factory.return_value.request("/auth-files")["files"]
+            accounts[2]["cooldowns"] = [
+                {"scope": "credential", "reason": "credential_quota", "retry_at": NOW + 500}
+            ]
+            again = p.snapshot(config, lanes, Path(directory), now=NOW + 5)
+            self.assertEqual(again["capacity"]["codex/gpt-sol"][1]["state"], "exhausted")
+            factory.return_value.usage.assert_called_once()
+
+    def test_cooldown_reason_from_the_proxy_and_expiry(self):
+        account = {
+            "cooldowns": [
+                {"scope": "credential", "reason": "credential_quota", "retry_at": NOW + 60}
+            ]
+        }
+        blocked = p.restriction(account, "claude-opus", NOW)
+        self.assertEqual((blocked["state"], blocked["reset_at"]), ("exhausted", NOW + 60))
+        self.assertIsNone(p.restriction(account, "claude-opus", NOW + 60))
+        account["cooldowns"][0]["reason"] = "request_error"
+        self.assertEqual(p.restriction(account, "claude-opus", NOW)["state"], "unavailable")
+
+    def test_corrupt_usage_reading_is_reread(self):
+        with tempfile.TemporaryDirectory() as directory:
+            cache = p.UsageCache(Path(directory))
+            client = self.client()
+            p.collect(client, [("codex", "gpt-sol")], NOW, cache)
+            for f in Path(directory).glob("usage-*.json"):
+                f.write_text("{not json")
+            capacity = p.collect(client, [("codex", "gpt-sol")], NOW + 10, cache)
+            self.assertEqual(capacity["codex/gpt-sol"][1]["state"], "ok")
+            self.assertEqual(client.usage.call_count, 2)
+
+    def test_a_stuck_lock_holder_never_blocks_a_launch_forever(self):
+        import threading
+        import time
+
+        with tempfile.TemporaryDirectory() as directory:
+            cache = p.UsageCache(Path(directory))
+            held, release = threading.Event(), threading.Event()
+
+            def stuck():
+                with cache.lock("codex", "b"):
+                    held.set()
+                    release.wait(5)
+
+            thread = threading.Thread(target=stuck)
+            thread.start()
+            held.wait(5)
+            started = time.monotonic()
+            with cache.lock("codex", "b", wait=0.3):
+                waited = time.monotonic() - started
+            release.set()
+            thread.join()
+            self.assertGreaterEqual(waited, 0.3)
+            self.assertLess(waited, 2)
+
     def test_key_file_permissions_and_never_source_dotenv(self):
         with (
             tempfile.TemporaryDirectory() as directory,

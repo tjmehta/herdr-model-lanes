@@ -13,7 +13,7 @@ key_env = "CLIPROXYAPI_MANAGEMENT_KEY"
 # key_file = "/path/to/protected/management.env"
 timeout_seconds = 4
 budget_seconds = 20
-cache_seconds = 30 # capped at 60, zero disables reuse
+cache_seconds = 0 # capped at 60; nonzero can hide a fresh proxy cooldown
 
 # These must ALREADY route inference through the same proxy and account pool.
 # This assertion is deliberately required; it does not configure native auth.

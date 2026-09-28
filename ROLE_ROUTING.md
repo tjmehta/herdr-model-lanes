@@ -158,10 +158,11 @@ of restored capacity.
 Requests use a 4-second default timeout and a 20-second scheduling budget; at
 most 64 account records are accepted. Each enabled relevant account is queried
 once per invocation, regardless of how many roles/models share its pool. There
-are no automatic retries. A small atomic mode-0600 cache stores only anonymous
-normalized capacity, keyed by source/config/requested model set, for 30 seconds
-at most by default, capped at 60. Reset boundaries invalidate it. `--refresh`
-bypasses it. Failed refreshes replace rather than revive old healthy data.
+are no automatic retries. An optional atomic mode-0600 lane cache stores only
+anonymous normalized capacity, keyed by source/config/requested model set, for
+`cache_seconds` (default 0, capped at 60). Leave it off: it would hide a proxy
+cooldown set since the previous launch. Reset boundaries invalidate it.
+`--refresh` bypasses it. Failed refreshes replace rather than revive old data.
 
 Provider usage endpoints throttle quickly (Anthropic returns 429 for minutes
 after a dozen reads), so each account's usage reading is cached separately and

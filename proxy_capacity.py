@@ -486,7 +486,9 @@ def snapshot(config, requested, cache_dir, force=False, now=None):
     # Cache only anonymous, normalized decisions. Include source and model set.
     identity = json.dumps([1, config, requested], sort_keys=True).encode()
     path = cache_dir / ("proxy-" + hashlib.sha256(identity).hexdigest()[:24] + ".json")
-    ttl = min(60, max(0, float(config.get("cache_seconds", 30))))
+    # Off by default: it would hide a proxy cooldown set since the last launch.
+    # Usage readings, the throttled part, have their own per-account cache.
+    ttl = min(60, max(0, float(config.get("cache_seconds", 0))))
     if not force:
         try:
             cached = json.loads(path.read_text())

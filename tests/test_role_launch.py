@@ -322,7 +322,7 @@ class PolicyAndLaunchTests(unittest.TestCase):
             f"policy_file = {json.dumps(str(self.policy))}\n[proxy]\n[launchers.claude]\ncommand = [{json.dumps(str(native))}]\nproxy_routed = true\n[launchers.codex]\ncommand = [{json.dumps(str(native))}]\nproxy_routed = true\n"
         )
         task = 'exact task\n"quotes" $(not-executed) ; `literal`'
-        script = "import role_launch as r; r.proxy.snapshot=lambda *a: {'fetched_at': 1800000000, 'capacity': {'codex/gpt-sol': [{'state':'ok','remaining_percent':70,'reset_at':1800000100}]}}; r.main()"
+        script = "import role_launch as r; r.proxy.snapshot=lambda *a, **k: {'fetched_at': 1800000000, 'capacity': {'codex/gpt-sol': [{'state':'ok','remaining_percent':70,'reset_at':1800000100}]}}; r.main()"
         env = dict(os.environ, CLIPROXYAPI_MANAGEMENT_KEY="must-not-reach-native")
         completed = subprocess.run(
             [

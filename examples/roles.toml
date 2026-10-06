@@ -3,6 +3,7 @@ policy_file = "role-policy.json"
 selection = "strict-priority"
 headroom_percent = 5
 unknown_capacity = "skip" # skip unknown lanes, or hold before lower priorities
+holds_file = "holds.json" # manual holds; a missing file means none
 # Optional: read ROLE/AGENTS.md on each invocation. Relative links keep their base.
 # instructions_root = "/path/to/agents"
 

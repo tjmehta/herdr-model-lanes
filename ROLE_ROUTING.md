@@ -193,3 +193,18 @@ shared/model windows, cooldowns/authentication, stale/failed reads, cache reset
 boundaries, all-exhausted refusal, policy reuse, arguments, instructions, cwd and
 shell quoting. Live read-only checks should use `--explain --refresh`; do not
 launch a paid task just to test capacity. See [attribution](THIRD_PARTY_NOTICES.md).
+
+## Manual holds
+
+`holds_file` (relative to the config) lists manual holds. A hold names a
+provider (`{"provider": "codex"}`), a model prefix (`{"provider": "claude",
+"model": "claude-fable"}`) or one proxy account (`{"provider": "codex",
+"account": "<auth-file name>"}`), with `until` as an epoch or `null` for
+"until lifted". Provider and model holds skip lanes before any capacity read;
+an account hold is never read and counts as `held`. A lane whose accounts are
+all held is `held`. Both show in `--explain` with the hold and its `until`.
+Expiry is lazy: a hold whose `until` has passed is ignored at the next
+selection. A missing file means no holds. A malformed file is an error, not
+"no holds". Holds only steer this selector. Native CLIs started directly
+never read them.
+

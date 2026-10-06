@@ -20,6 +20,8 @@ import urllib.request
 from datetime import datetime
 from pathlib import Path
 
+import holds as holdlib
+
 URLS = {
     "claude": "https://api.anthropic.com/api/oauth/usage",
     "codex": "https://chatgpt.com/backend-api/wham/usage",
@@ -419,7 +421,7 @@ def write_private(path, data):
             os.unlink(temporary)
 
 
-def collect(client, requested, now, cache=None):
+def collect(client, requested, now, cache=None, holds=()):
     """Return per-lane anonymous account states, never account identifiers."""
     accounts = client.request("/auth-files").get("files")
     if not isinstance(accounts, list) or len(accounts) > 64:
@@ -435,6 +437,12 @@ def collect(client, requested, now, cache=None):
         if not identity or (provider, identity) in seen:
             continue
         seen.add((provider, identity))
+        hold = holdlib.account_hold(holds, provider, account.get("name"), now)
+        if hold:
+            # A held account is never read, so holding it costs no usage request.
+            for model in models:
+                output[f"{provider}/{model}"].append(result("held", hold.get("until")))
+            continue
         try:
             listed = client.request(
                 "/auth-files/models?"
@@ -480,11 +488,13 @@ def collect(client, requested, now, cache=None):
     return output
 
 
-def snapshot(config, requested, cache_dir, force=False, now=None):
+def snapshot(config, requested, cache_dir, force=False, now=None, holds=()):
     now = time.time() if now is None else now
     requested = sorted(set(requested))
-    # Cache only anonymous, normalized decisions. Include source and model set.
-    identity = json.dumps([1, config, requested], sort_keys=True).encode()
+    holds = [h for h in holdlib.active(holds, now) if h.get("account")]
+    # Cache only anonymous, normalized decisions. Include source, model set and
+    # account holds, so placing or lifting a hold is never hidden by the cache.
+    identity = json.dumps([1, config, requested, holds], sort_keys=True).encode()
     path = cache_dir / ("proxy-" + hashlib.sha256(identity).hexdigest()[:24] + ".json")
     # Off by default: it would hide a proxy cooldown set since the last launch.
     # Usage readings, the throttled part, have their own per-account cache.
@@ -511,7 +521,7 @@ def snapshot(config, requested, cache_dir, force=False, now=None):
         force,
     )
     try:
-        capacity = collect(client, requested, now, usage)
+        capacity = collect(client, requested, now, usage, holds)
     except CapacityError as exc:
         capacity = {f"{p}/{m}": [result(str(exc))] for p, m in requested}
     data = {"fetched_at": now, "capacity": capacity}

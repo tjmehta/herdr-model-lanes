@@ -12,6 +12,7 @@ import time
 import tomllib
 from pathlib import Path
 
+import holds as holdlib
 import proxy_capacity as proxy
 
 
@@ -33,7 +34,7 @@ def load_config(path):
         or not 0 <= headroom < 100
     ):
         raise PolicyError("headroom_percent must be in [0, 100)")
-    for name in ("policy_file", "instructions_root"):
+    for name in ("policy_file", "instructions_root", "holds_file"):
         if config.get(name):
             config[name] = str(resolve_path(path.parent, config[name]))
     if config.get("proxy", {}).get("key_file"):
@@ -153,11 +154,39 @@ def lanes_for_role(config, role):
     return lanes
 
 
-def choose(lanes, capacity, headroom=5, unknown="skip"):
+def choose(lanes, capacity, headroom=5, unknown="skip", holds=(), now=None):
     decisions = []
     selected = None
     for lane in lanes:
+        hold = holdlib.lane_hold(holds, lane["kind"], lane["model"], now)
+        if hold:
+            decisions.append(
+                {
+                    "route": lane["name"],
+                    "kind": lane["kind"],
+                    "model": lane["model"],
+                    "state": "held",
+                    "hold": holdlib.label(hold),
+                    "reason": hold.get("reason"),
+                    "accounts": [],
+                    "retry_at": hold.get("until"),
+                }
+            )
+            continue
         accounts = capacity.get(f"{lane['kind']}/{lane['model']}", [])
+        if accounts and all(a["state"] == "held" for a in accounts):
+            decisions.append(
+                {
+                    "route": lane["name"],
+                    "kind": lane["kind"],
+                    "model": lane["model"],
+                    "state": "held",
+                    "accounts": accounts,
+                    "retry_at": min((a["reset_at"] or 0) for a in accounts) or None,
+                }
+            )
+            continue
+        accounts = [a for a in accounts if a["state"] != "held"]
         usable = [
             a
             for a in accounts
@@ -346,17 +375,20 @@ def main(argv=None):
                 ),
             )
         )
+        holds = holdlib.load(config.get("holds_file"))
         snap = proxy.snapshot(
             config["proxy"],
             [(l["kind"], l["model"]) for l in lanes],
             cache_dir,
             args.refresh,
+            holds=holds,
         )
         selected, decisions = choose(
             lanes,
             snap["capacity"],
             config.get("headroom_percent", 5),
             config.get("unknown_capacity", "skip"),
+            holds,
         )
         report = {
             "role": args.role,

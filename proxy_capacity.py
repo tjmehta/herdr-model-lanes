@@ -122,7 +122,10 @@ def parse_usage(provider, body, model, now):
             add(body.get(required), "utilization")
         for name, value in body.items():
             # seven_day_breakdown splits usage by surface; it is not a limit window.
-            if name in ("five_hour", "seven_day", "seven_day_breakdown") or value is None:
+            if (
+                name in ("five_hour", "seven_day", "seven_day_breakdown")
+                or value is None
+            ):
                 continue
             if not name.startswith(("seven_day_", "five_hour_")):
                 continue
@@ -365,7 +368,13 @@ class UsageCache:
     def refresh_after(self, hits):
         """Full `fresh` above 50% left, a third of it from 20%, a sixth below."""
         left = min((v["remaining_percent"] or 0) for v in hits.values())
-        return self.fresh if left > 50 else self.fresh / 3 if left >= 20 else self.fresh / 6
+        return (
+            self.fresh
+            if left > 50
+            else self.fresh / 3
+            if left >= 20
+            else self.fresh / 6
+        )
 
     def get(self, provider, identity, models, now, limit=None):
         if self.force:
@@ -387,7 +396,9 @@ class UsageCache:
     def lock(self, provider, identity, wait=25):
         """One refresh per account at a time; other launches reuse its reading."""
         self.directory.mkdir(mode=0o700, parents=True, exist_ok=True)
-        fd = os.open(self.path(provider, identity, ".lock"), os.O_RDWR | os.O_CREAT, 0o600)
+        fd = os.open(
+            self.path(provider, identity, ".lock"), os.O_RDWR | os.O_CREAT, 0o600
+        )
         try:
             deadline = time.monotonic() + wait
             while True:
@@ -405,7 +416,9 @@ class UsageCache:
 
     def put(self, provider, identity, models, now):
         self.directory.mkdir(mode=0o700, parents=True, exist_ok=True)
-        write_private(self.path(provider, identity), {"fetched_at": now, "models": models})
+        write_private(
+            self.path(provider, identity), {"fetched_at": now, "models": models}
+        )
 
 
 def write_private(path, data):
@@ -466,7 +479,11 @@ def collect(client, requested, now, cache=None, holds=()):
         if not pending:
             continue
         states = cache and cache.get(provider, identity, pending, now)
-        with cache.lock(provider, identity) if cache and not states else contextlib.nullcontext():
+        with (
+            cache.lock(provider, identity)
+            if cache and not states
+            else contextlib.nullcontext()
+        ):
             # Launches that waited on the lock reuse the reading it produced.
             states = states or (cache and cache.get(provider, identity, pending, now))
             if not states:
@@ -481,7 +498,9 @@ def collect(client, requested, now, cache=None, holds=()):
                     # Throttled or unreachable: a bounded older reading beats none.
                     # An auth error is never masked.
                     if str(exc) == "unavailable" and cache:
-                        states = cache.get(provider, identity, pending, now, cache.stale)
+                        states = cache.get(
+                            provider, identity, pending, now, cache.stale
+                        )
                     states = states or {m: result(str(exc)) for m in pending}
         for model in pending:
             output[f"{provider}/{model}"].append(states[model])

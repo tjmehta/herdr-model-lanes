@@ -198,7 +198,11 @@ class CollectionTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             client = self.client()
             client.request.side_effect = lambda path: (
-                {"files": [{"auth_index": "b", "name": "private-b", "provider": "codex"}]}
+                {
+                    "files": [
+                        {"auth_index": "b", "name": "private-b", "provider": "codex"}
+                    ]
+                }
                 if path == "/auth-files"
                 else {"models": [{"id": "gpt-sol"}, {"id": "gpt-luna"}]}
             )
@@ -207,7 +211,9 @@ class CollectionTests(unittest.TestCase):
             other = p.collect(client, [("codex", "gpt-luna")], NOW + 10, cache)
             self.assertEqual(other["codex/gpt-luna"][0]["state"], "ok")
             client.usage.assert_called_once()
-            self.assertNotIn("private", "".join(f.read_text() for f in Path(directory).iterdir()))
+            self.assertNotIn(
+                "private", "".join(f.read_text() for f in Path(directory).iterdir())
+            )
 
             client.usage.side_effect = p.CapacityError("unavailable")
             throttled = p.collect(client, [("codex", "gpt-sol")], NOW + 600, cache)
@@ -227,8 +233,14 @@ class CollectionTests(unittest.TestCase):
     def test_usage_rechecks_sooner_as_an_account_nears_empty(self):
         with tempfile.TemporaryDirectory() as directory:
             cache = p.UsageCache(Path(directory), fresh=1800)
-            for used, reuse, recheck in ((40, 1799, 1800), (70, 599, 600), (85, 299, 300)):
-                cache.put("claude", "a", {"m": p.result("ok", NOW + 9000, 100 - used)}, NOW)
+            for used, reuse, recheck in (
+                (40, 1799, 1800),
+                (70, 599, 600),
+                (85, 299, 300),
+            ):
+                cache.put(
+                    "claude", "a", {"m": p.result("ok", NOW + 9000, 100 - used)}, NOW
+                )
                 self.assertIsNotNone(cache.get("claude", "a", ["m"], NOW + reuse))
                 self.assertIsNone(cache.get("claude", "a", ["m"], NOW + recheck))
 
@@ -244,7 +256,9 @@ class CollectionTests(unittest.TestCase):
                 with cache.lock("codex", "b"):
                     held.set()
                     release.wait(5)
-                    cache.put("codex", "b", {"gpt-sol": p.result("ok", NOW + 9000, 70)}, NOW)
+                    cache.put(
+                        "codex", "b", {"gpt-sol": p.result("ok", NOW + 9000, 70)}, NOW
+                    )
 
             thread = threading.Thread(target=other_launch)
             thread.start()
@@ -275,23 +289,37 @@ class CollectionTests(unittest.TestCase):
             self.assertEqual(first["capacity"]["codex/gpt-sol"][1]["state"], "ok")
             accounts = factory.return_value.request("/auth-files")["files"]
             accounts[2]["cooldowns"] = [
-                {"scope": "credential", "reason": "credential_quota", "retry_at": NOW + 500}
+                {
+                    "scope": "credential",
+                    "reason": "credential_quota",
+                    "retry_at": NOW + 500,
+                }
             ]
             again = p.snapshot(config, lanes, Path(directory), now=NOW + 5)
-            self.assertEqual(again["capacity"]["codex/gpt-sol"][1]["state"], "exhausted")
+            self.assertEqual(
+                again["capacity"]["codex/gpt-sol"][1]["state"], "exhausted"
+            )
             factory.return_value.usage.assert_called_once()
 
     def test_cooldown_reason_from_the_proxy_and_expiry(self):
         account = {
             "cooldowns": [
-                {"scope": "credential", "reason": "credential_quota", "retry_at": NOW + 60}
+                {
+                    "scope": "credential",
+                    "reason": "credential_quota",
+                    "retry_at": NOW + 60,
+                }
             ]
         }
         blocked = p.restriction(account, "claude-opus", NOW)
-        self.assertEqual((blocked["state"], blocked["reset_at"]), ("exhausted", NOW + 60))
+        self.assertEqual(
+            (blocked["state"], blocked["reset_at"]), ("exhausted", NOW + 60)
+        )
         self.assertIsNone(p.restriction(account, "claude-opus", NOW + 60))
         account["cooldowns"][0]["reason"] = "request_error"
-        self.assertEqual(p.restriction(account, "claude-opus", NOW)["state"], "unavailable")
+        self.assertEqual(
+            p.restriction(account, "claude-opus", NOW)["state"], "unavailable"
+        )
 
     def test_corrupt_usage_reading_is_reread(self):
         with tempfile.TemporaryDirectory() as directory:
